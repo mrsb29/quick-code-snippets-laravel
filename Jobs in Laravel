@@ -1,0 +1,334 @@
+class TestJob extends Job
+{
+    protected $month;
+    protected $year;
+    protected $created_by;
+    protected $modified_by;
+    protected $route;
+
+    public function __construct($month, $year, $created_by, $modified_by, $route)
+    {
+        $this->month = $month;
+        $this->year = $year;
+        $this->created_by = $created_by;
+        $this->modified_by = $modified_by;
+        $this->route = $route;
+    }
+
+    public function handle()
+    {
+        try {
+            $monthName = $yearName = '';
+            $areaId = General::getIdByAreaRoute($this->route);
+            $monthId = $this->month;
+            $yearId = $this->year;
+            $year = DB::table('year')
+                ->select('name')
+                ->where('id', $yearId)
+                ->where('active', 1)
+                ->where('deleted_by', null)
+                ->where('deleted_at', null)
+                ->first();
+            if (!Utility::isNull($year)) {
+                $yearName = $year->name;
+            }
+            $month = DB::table('months')
+                ->select('month')
+                ->where('id', $monthId)
+                ->where('active', 1)
+                ->where('deleted_by', null)
+                ->where('deleted_at', null)
+                ->first();
+            if (!Utility::isNull($month)) {
+                $monthName = $month->month;
+            }
+            $monthNumber = Carbon::parse('1' . $monthName . '')->month;
+            $firstDate = date('01-' . $monthNumber . '-' . $yearName);
+            $startDate = date("Y-m-d", strtotime($firstDate));
+            $lastDate = date(date('t', strtotime($firstDate)) . '-' . $monthNumber . '-' . $yearName);
+            $endDate = date("Y-m-d", strtotime($lastDate));
+            $logSuccessStatusId = General::getIdByName('logsuccessstatus', [trim(strtoupper(EntityStatePayrollStatus::Success))]);
+            $logFailureStatusId = General::getIdByName('logfailedstatus', [trim(strtoupper(EntityStatePayrollStatus::Failed))]);
+
+            $employee = DB::table('employees')
+                ->leftjoin('employeeofficialdetails', 'employeeofficialdetails.employee_id', '=', 'employees.id')
+                ->leftjoin('employeepayrolldetails', 'employeepayrolldetails.employee_id', '=', 'employees.id')
+                ->leftjoin('employeetypes', 'employeetypes.id', '=', 'employeeofficialdetails.employeetype_id')
+                ->select('employees.id', 'employees.currentstate_id', 'employeepayrolldetails.monthlysalary', 'employeeofficialdetails.leavingdate', 'employeeofficialdetails.worksite_id', 'employeepayrolldetails.basic',
+                    'employeepayrolldetails.hra', 'employeepayrolldetails.lwf', 'employeepayrolldetails.hourlyrate', 'employeepayrolldetails.travelallowance', 'employeepayrolldetails.siteallowance', 'employeepayrolldetails.professionaltax', 'employeeofficialdetails.skilledcategory_id',
+                    'employeetypes.name as employeetype', 'employeepayrolldetails.providentfund', 'employeepayrolldetails.conveyance', 'employeepayrolldetails.esic', 'employeepayrolldetails.tds', 'employeepayrolldetails.dailyrate')
+                ->whereMonth('employeeofficialdetails.leavingdate', $monthNumber)
+                ->orwhereNull('employeeofficialdetails.leavingdate')
+                ->where('employees.deleted_by', null)
+                ->where('employees.deleted_at', null)
+                ->where('employees.active', 1)
+                ->having('employeepayrolldetails.basic', '>', 0)
+                ->get();
+            $monthlyWorkingDays = PayslipProcessingController::getMonthlyWorkingDays($monthName, $yearName);
+            if (!Utility::isNull($monthlyWorkingDays) && $monthlyWorkingDays > 0) {
+                if (sizeof($employee) > 0)  {
+                    $startedMessage = 'Payroll run started for  ' . $monthName . ' ' . $yearName . '';
+                    $processingCenterLog = ProcessingCenterLogController::insertProcessingCenterLog($areaId, $logSuccessStatusId, $startedMessage, $this->created_by);
+                    foreach ($employee as $key) {
+                        try {
+                            $payslip = DB::table('payslip')
+                                ->select('startdate')
+                                ->whereMonth('startdate', $monthNumber)
+                                ->whereYear('startdate', $yearName)
+                                ->where('employee_id', $key->id)
+                                ->where('deleted_by', null)
+                                ->where('deleted_at', null)
+                                ->where('active', 1)
+                                ->first();
+                            if (Utility::isNull($payslip)) {
+                                $workedDays = PayslipProcessingController::getWorkedDay($key->id, $monthNumber, $yearName);
+                                if (!Utility::isNull($workedDays) && $workedDays > 0) {
+                                    $siteAllowance = PayslipProcessingController::getSiteAllowance($key->id, $key->siteallowance, $monthNumber, $yearName, $key->worksite_id);
+                                    $professionalTax = PayslipProcessingController::getProfessionalTax($key->professionaltax, $monthName);
+                                    $tdsDeduction = $key->tds;
+                                    $totalOverTimeHours = PayslipProcessingController::getTotalOverTimeHours($key->id, $monthNumber, $yearName);
+                                    $overtime = CommonController::convertTimeToDecimal($totalOverTimeHours) * $key->hourlyrate;
+                                    $lwf = PayslipProcessingController::getLWF($key->lwf, $monthName);
+                                    $totalLateHours = PayslipProcessingController::getTotalLateHours($key->id, $monthNumber, $yearName);
+                                    $lateHours = CommonController::convertTimeToDecimal($totalLateHours) * $key->hourlyrate;
+                                    $travelAllowance = PayslipProcessingController::getTravelAllowance($key->id, $key->worksite_id, $key->travelallowance, $monthNumber, $yearName);
+                                    if ($key->employeetype === [trim(strtoupper(EntityStateEmployeeType::Contractual))] || Utility::isNull($key->monthlysalary) || $key->monthlysalary <= 0) {
+                                        $basic = PayslipProcessingController::getBasicSalary($key->basic, $workedDays);
+                                        $providentFund = PayslipProcessingController::getProvidentFund($key->providentfund, $key->worksite_id, $basic);
+                                        $hra = PayslipProcessingController::getHraSalary($key->hra, $workedDays);
+                                        $conveyance = PayslipProcessingController::getConveyance($key->conveyance, $workedDays);
+                                        $loan = PayslipProcessingController::getloan($key->id, $monthNumber, $yearName);
+
+                                        if (!Utility::isNull($loan)) {
+                                            $loanInstallment = $loan->installment;
+                                            $loanId = $loan->id;
+                                        } else {
+                                            $loanInstallment = null;
+                                            $loanId = null;
+                                        }
+                                        $travelExpenses = PayslipProcessingController::getTravelExpenses($key->id, $monthNumber, $yearName);
+                                        $amount = array();
+                                        $travelExpensesId = array();
+                                        foreach ($travelExpenses as $row) {
+                                            array_push($amount, $row->amount);
+                                            array_push($travelExpensesId, $row->id);
+                                        }
+                                        $travelExpensesAmount = array_sum($amount);
+                                        $arrearBasic = PayslipProcessingController::getArrearsBasic($key->id, $monthId, $yearId);
+                                        if (!Utility::isNull($arrearBasic)) {
+                                            $arrearAmount = $arrearBasic->amount;
+                                            $arrearId = $arrearBasic->id;
+                                        } else {
+                                            $arrearAmount = null;
+                                            $arrearId = null;
+                                        }
+                                        $bonus = PayslipProcessingController::getBonus($key->dailyrate, $key->skilledcategory_id, $monthName, $yearName, $workedDays);
+                                        $miscCredit = PayslipProcessingController::getMiscCredit($travelExpensesAmount);
+                                        $grossSalary = PayslipProcessingController::getGrossSalary($basic, $hra, $overtime, $miscCredit, $bonus, $arrearAmount, $conveyance, $siteAllowance, $travelAllowance);
+                                        $esic = PayslipProcessingController::getEsicDeductions($key->esic, $key->worksite_id, $grossSalary);
+                                        $miscDeduction = PayslipProcessingController::getMiscDeduction($lateHours);
+                                        $totalDeduction = PayslipProcessingController::getTotalDeductions($providentFund, $professionalTax, $miscDeduction, $esic, $tdsDeduction, $loanInstallment, $lwf);
+                                        $netSalary = PayslipProcessingController::getNetSalary($grossSalary, $totalDeduction);
+                                        $payslip = new PaySlip();
+                                        $payslip->employee_id = $key->id;
+                                        $payslip->worksite_id = $key->worksite_id;
+                                        $payslip->workeddays = $workedDays;
+                                        $payslip->basic = $basic;
+                                        $payslip->dailyrate = $key->dailyrate;
+                                        $payslip->hra = $hra;
+                                        $payslip->esic = $esic;
+                                        $payslip->tds = $tdsDeduction;
+                                        $payslip->professionaltax = $professionalTax;
+                                        $payslip->providentfund = $providentFund;
+                                        $payslip->overtime = $overtime;
+                                        $payslip->travelexpenses = $travelExpensesAmount;
+                                        $payslip->lwf = $lwf;
+                                        $payslip->bonus = $bonus;
+                                        $payslip->latehours = $lateHours;
+                                        $payslip->conveyance = $conveyance;
+                                        $payslip->loan = $loanInstallment;
+                                        $payslip->siteallowance = $siteAllowance;
+                                        $payslip->travelallowance = $travelAllowance;
+                                        $payslip->misccredit = $miscCredit;
+                                        $payslip->miscdeduction = $miscDeduction;
+                                        $payslip->grosssalary = $grossSalary;
+                                        $payslip->totaldeductions = $totalDeduction;
+                                        $payslip->netsalary = $netSalary;
+                                        $payslip->monthlysalary = $key->monthlysalary;
+                                        $payslip->totalovertime = $totalOverTimeHours;
+                                        $payslip->totallatehours = $totalLateHours;
+                                        $payslip->arrearbasic = $arrearAmount;
+                                        $payslip->payrollrundate = Utility::getDateTime();
+                                        $payslip->startdate = $startDate;
+                                        $payslip->enddate = $endDate;
+                                        $payslip->active = true;
+                                        $payslip->created_by = $this->created_by;
+                                        $payslip->created_at = Utility::getDateTime();
+                                        $payslip->modified_by = $this->modified_by;
+                                        $payslip->modified_at = Utility::getDateTime();
+                                        $payslip->save();
+                                        if (!Utility::isNull($loanId)) {
+                                            $paidStatusId = General::getIdByName('loanschedulestatus', [trim(strtoupper(EntityStateLoanScheduleStatus::Paid))]);
+                                            $loanScheduleStatus = Loanschedule::find($loanId);
+                                            $loanScheduleStatus->loanschedulestatus_id = $paidStatusId;
+                                            $loanScheduleStatus->paymentdate = Utility::getDateTime();
+                                            $loanScheduleStatus->save();
+                                        }
+                                        if (!Utility::isNull($travelExpensesId)) {
+                                            $approvedStatusId = General::getIdByName('travelexpensestatus', [trim(strtoupper(EntityStateExpensesStatus::Paid))]);
+                                            DB::table('travelexpenses')->whereIn('id', $travelExpensesId)->update(array('travelexpensestatus_id' => $approvedStatusId, 'paiddate' => Utility::getDateTime()));
+                                        }
+                                        if (!Utility::isNull($arrearBasic)) {
+                                            $paidStatusId = General::getIdByName('arrearstatus', [trim(strtoupper(EntityStateArrearStatus::Paid))]);
+                                            $arrearBasic = Arrear::find($arrearId);
+                                            $arrearBasic->arrearstatus_id = $paidStatusId;
+                                            $arrearBasic->paiddate = Utility::getDateTime();
+                                            $arrearBasic->save();
+                                        }
+                                    }
+                                    else {
+                                        $basic = PayslipProcessingController::getBasicSalary($key->basic, $workedDays, $monthlyWorkingDays);
+                                        $providentFund = PayslipProcessingController::getProvidentFund($key->providentfund, $key->worksite_id, $basic);
+                                        $hra = PayslipProcessingController::getHraSalary($key->hra, $workedDays, $monthlyWorkingDays);
+                                        $conveyance = PayslipProcessingController::getConveyance($key->conveyance, $workedDays, $monthlyWorkingDays);
+                                        $loan = PayslipProcessingController::getloan($key->id, $monthNumber, $yearName);
+
+                                        if (!Utility::isNull($loan)) {
+                                            $loanInstallment = $loan->installment;
+                                            $loanId = $loan->id;
+                                        } else {
+                                            $loanInstallment = null;
+                                            $loanId = null;
+                                        }
+                                        $travelExpenses = PayslipProcessingController::getTravelExpenses($key->id, $monthNumber, $yearName);
+                                        $amount = array();
+                                        $travelExpensesId = array();
+                                        foreach ($travelExpenses as $row) {
+                                            array_push($amount, $row->amount);
+                                            array_push($travelExpensesId, $row->id);
+                                        }
+                                        $travelExpensesAmount = array_sum($amount);
+                                        $arrearBasic = PayslipProcessingController::getArrearsBasic($key->id, $monthId, $yearId);
+                                        if (!Utility::isNull($arrearBasic)) {
+                                            $arrearAmount = $arrearBasic->amount;
+                                            $arrearId = $arrearBasic->id;
+                                        } else {
+                                            $arrearAmount = null;
+                                            $arrearId = null;
+                                        }
+                                        $bonus = PayslipProcessingController::getBonus($key->monthlysalary, $key->skilledcategory_id, $monthName, $yearName);
+                                        $miscCredit = PayslipProcessingController::getMiscCredit($travelExpensesAmount);
+                                        $grossSalary = PayslipProcessingController::getGrossSalary($basic, $hra, $overtime, $miscCredit, $bonus, $arrearAmount, $conveyance, $siteAllowance, $travelAllowance);
+                                        $esic = PayslipProcessingController::getEsicDeductions($key->esic, $key->worksite_id, $grossSalary);
+                                        $miscDeduction = PayslipProcessingController::getMiscDeduction($lateHours);
+                                        $totalDeduction = PayslipProcessingController::getTotalDeductions($providentFund, $professionalTax, $miscDeduction, $esic, $tdsDeduction, $loanInstallment, $lwf);
+                                        $netSalary = PayslipProcessingController::getNetSalary($grossSalary, $totalDeduction);
+                                        $payslip = new PaySlip();
+                                        $payslip->employee_id = $key->id;
+                                        $payslip->worksite_id = $key->worksite_id;
+                                        $payslip->workeddays = $workedDays;
+                                        $payslip->basic = $basic;
+                                        $payslip->dailyrate = $key->dailyrate;
+                                        $payslip->hra = $hra;
+                                        $payslip->esic = $esic;
+                                        $payslip->tds = $tdsDeduction;
+                                        $payslip->professionaltax = $professionalTax;
+                                        $payslip->providentfund = $providentFund;
+                                        $payslip->overtime = $overtime;
+                                        $payslip->travelexpenses = $travelExpensesAmount;
+                                        $payslip->lwf = $lwf;
+                                        $payslip->bonus = $bonus;
+                                        $payslip->latehours = $lateHours;
+                                        $payslip->conveyance = $conveyance;
+                                        $payslip->loan = $loanInstallment;
+                                        $payslip->siteallowance = $siteAllowance;
+                                        $payslip->travelallowance = $travelAllowance;
+                                        $payslip->misccredit = $miscCredit;
+                                        $payslip->miscdeduction = $miscDeduction;
+                                        $payslip->grosssalary = $grossSalary;
+                                        $payslip->totaldeductions = $totalDeduction;
+                                        $payslip->netsalary = $netSalary;
+                                        $payslip->monthlysalary = $key->monthlysalary;
+                                        $payslip->totalovertime = $totalOverTimeHours;
+                                        $payslip->totallatehours = $totalLateHours;
+                                        $payslip->arrearbasic = $arrearAmount;
+                                        $payslip->payrollrundate = Utility::getDateTime();
+                                        $payslip->startdate = $startDate;
+                                        $payslip->enddate = $endDate;
+                                        $payslip->active = true;
+                                        $payslip->created_by = $this->created_by;
+                                        $payslip->created_at = Utility::getDateTime();
+                                        $payslip->modified_by = $this->modified_by;
+                                        $payslip->modified_at = Utility::getDateTime();
+                                        $payslip->save();
+                                        if (!Utility::isNull($loanId)) {
+                                            $paidStatusId = General::getIdByName('loanschedulestatus', [trim(strtoupper(EntityStateLoanScheduleStatus::Paid))]);
+                                            $loanScheduleStatus = Loanschedule::find($loanId);
+                                            $loanScheduleStatus->loanschedulestatus_id = $paidStatusId;
+                                            $loanScheduleStatus->paymentdate = Utility::getDateTime();
+                                            $loanScheduleStatus->save();
+                                        }
+                                        if (!Utility::isNull($travelExpensesId)) {
+                                            $approvedStatusId = General::getIdByName('travelexpensestatus', [trim(strtoupper(EntityStateExpensesStatus::Paid))]);
+                                            DB::table('travelexpenses')->whereIn('id', $travelExpensesId)->update(array('travelexpensestatus_id' => $approvedStatusId, 'paiddate' => Utility::getDateTime()));
+                                        }
+                                        if (!Utility::isNull($arrearBasic)) {
+                                            $paidStatusId = General::getIdByName('arrearstatus', [trim(strtoupper(EntityStateArrearStatus::Paid))]);
+                                            $arrearBasic = Arrear::find($arrearId);
+                                            $arrearBasic->arrearstatus_id = $paidStatusId;
+                                            $arrearBasic->paiddate = Utility::getDateTime();
+                                            $arrearBasic->save();
+                                        }
+
+                                    }
+                                    $successMessage = 'Pay slip generated for  ' . $monthName . ' ' . $yearName . '';
+                                    $payrollLog = PayrollLogController::insertPayrollLog($key->id, $logSuccessStatusId, $successMessage, $this->created_by);
+                                }
+                                else {
+                                    $failedMessage = 'Insert payroll log of  timesheet for  ' . $monthName . ' ' . $yearName . ' '.'not added';
+                                    $payrollLog = PayrollLogController::insertPayrollLog($key->id, $logFailureStatusId, $failedMessage, $this->created_by);
+                                }
+                            }
+                            else{
+                                $failedMessage = 'Insert payroll log of  salary slip for ' . $monthName . ' ' . $yearName . ' '.'already generated';
+                                $payrollLog = PayrollLogController::insertPayrollLog($key->id, $logFailureStatusId, $failedMessage, $this->created_by);
+                            }
+
+
+                            $completedMessage = 'Payroll run completed for  ' . $monthName . '  ' . $yearName . '';
+                            $processingCenterLog = ProcessingCenterLogController::insertProcessingCenterLog($areaId, $logSuccessStatusId, $completedMessage, $this->created_by);
+
+                        } catch (\Exception $e) {
+                            $failedMessage = 'Payroll run failed for  ' . $monthName . ' ' . $yearName . '';
+                            $payrollLog = PayrollLogController::insertPayrollLog($key->id, $logFailureStatusId, $failedMessage, $this->created_by);
+
+                        }
+                    }
+                    $completedMessage = 'Payroll run completed for  ' . $monthName .' ' .$yearName . '';
+                    $processingCenterLog = ProcessingCenterLogController::insertProcessingCenterLog($areaId, $logSuccessStatusId, $completedMessage, $this->created_by);
+                    $response = response()->json(array("message" =>$completedMessage, "success" => "true"));
+                    return $response;
+                }
+                else {
+                    $failedMessage = 'Payroll run failed for  ' . $monthName .' ' .$yearName . ' because employees not found.';
+                    $processingCenterLog = ProcessingCenterLogController::insertProcessingCenterLog($areaId, $logFailureStatusId, $failedMessage, $this->created_by);
+                    $response = response()->json(array("message" => $failedMessage, "success" => "false"));
+                    return $response;
+                }
+            } else {
+                $failedMessage = 'Payroll run failed for  ' . $monthName .' '. $yearName . ' because monthly working days not added';
+                $processingCenterLog = ProcessingCenterLogController::insertProcessingCenterLog($areaId, $logFailureStatusId, $failedMessage, $this->created_by);
+                $response = response()->json(array("message" => $failedMessage, "success" => "false"));
+                return $response;
+            }
+
+        } catch (\Exception $e) {
+            $logFailureStatusId = General::getIdByName('logfailedstatus', [trim(strtoupper(EntityStatePayrollStatus::Failed))]);
+            $failedMessage = 'Payroll run failed for  ' . $monthName .' '. $yearName . '';
+            $processingCenterLog = ProcessingCenterLogController::insertProcessingCenterLog($areaId, $logFailureStatusId, $failedMessage, $this->created_by);
+            Utility::writeLogData($e);
+            $response = response()->json(array("message" => $failedMessage, "success" => "false"));
+            return $response;
+        }
+    }
+}
