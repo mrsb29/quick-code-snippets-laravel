@@ -1,0 +1,35 @@
+<?php
+
+namespace App\Http\Middleware;
+use Closure;
+use GuzzleHttp\Client;
+use Illuminate\Support\Facades\Config;
+class SetDatabaseConnection
+{
+    /**
+     * Handle an incoming request.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  \Closure  $next
+     * @return mixed
+     */
+    public function handle($request, Closure $next)
+    {
+        $business_id = $request->business_id;
+        $client = new Client();
+        $response = $client->get('http://localhost:8002/databaseDetails', [
+            'query' => ['business_id' => $business_id]
+        ]);
+        $stream = $response->getBody();
+        $responseData = $stream->getContents();
+        $responseDataArray = json_decode($responseData, true);
+        $backendData = $responseDataArray;
+        $database=base64_decode($backendData['database'][0]['databasename']);
+        $username=base64_decode($backendData['database'][0]['databaseusername']);
+        $password='';
+        Config::set('database.connections.mysql.database',$database);
+        Config::set('database.connections.mysql.username',$username);
+        Config::set('database.connections.mysql.password',$password);
+        return $next($request);
+    }
+}
