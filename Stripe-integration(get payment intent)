@@ -1,0 +1,47 @@
+    public function paymentIntent(Request $request)
+    {
+        $stripe = new \Stripe\StripeClient('sk_test_51HiaGGIQHGOpsPGObPAYfQLLo0LaeHjEMNq4UThgfsLGRWfjEVgVedD6zkf1sBakkfqzzARlE3mWDrU3XlMEBDYB00smnsKC4D');
+        \Stripe\Stripe::setApiKey('sk_test_51HiaGGIQHGOpsPGObPAYfQLLo0LaeHjEMNq4UThgfsLGRWfjEVgVedD6zkf1sBakkfqzzARlE3mWDrU3XlMEBDYB00smnsKC4D');
+
+        try
+        {
+            $customer = \Stripe\Customer::create([
+                'email' => $request->customeremail,
+            ]);
+
+            $customerId = $customer->id;
+            $subscription = $stripe->subscriptions->create([
+                'customer' => $customerId,
+                'currency' => $request->currency,
+                'items' => [['price' => $request->stripeplanpriceid]],
+                'payment_behavior' => 'default_incomplete',
+                'expand' => ['latest_invoice.payment_intent'],
+            ]);
+
+            $paymentIntent = $subscription->latest_invoice->payment_intent;
+            return response()->json(['clientSecret' => $paymentIntent]);
+
+//            $currency=$request->currency;
+//            $paymentIntent = $stripe->paymentIntents->create([
+//                'amount' => $price * 1,
+//                'currency' => $currency,
+//                'interval'=>1,
+//                'product' => 'si_Pfu1wa9QHxAEr2',
+//                'automatic_payment_methods' => [
+//                'enabled' => true,
+//                ],
+//            ]);
+//
+////            $paymentIntent='pi_1OWuBKIQHGOpsPGOF5t4FRKf_secret_amK3dVq6Hf51C7qqdnf7kLkAl';
+//            return response()->json(['clientSecret' => $paymentIntent->client_secret]);
+////            return response()->json(['clientSecret' => $paymentIntent]);
+/// \
+
+        }
+        catch (Exception $e)
+        {
+            Utility::writeLogData($e);
+            $response = response()->json(array("message"=>"Some error occurred","success"=>"false"));
+            return $response;
+        }
+    }
