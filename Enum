@@ -1,0 +1,15 @@
+<?php
+
+
+namespace App\Enums;
+
+
+class EntityQuestionnaireType
+{
+    const CustomerFeedback = 'CUSTFEEDBACK';
+    const LeadFeedback = 'LEADFEEDBACK';
+    const ComplaintFeedback = 'COMPFEEDBACK';
+    const CandidateMCQ = 'CANDMCQ';
+    const CandidatePersonalInterview = 'CANDPERSONLINTRW';
+    const LeadQualification = 'LEADQUALIFICATION';
+}
