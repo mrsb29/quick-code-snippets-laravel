@@ -1,0 +1,96 @@
+<?php
+
+namespace App\Http\Controllers;
+use App\Common\Utility;
+use Firebase\JWT\ExpiredException;
+use Firebase\JWT\JWT;
+use GuzzleHttp\Client;
+use http\Exception;
+use Illuminate\Http\Request;
+use \Tuupola\Base62;
+class AuthController extends Controller
+{
+    private $request;
+    public function __construct(Request $request) {
+        $this->request = $request;
+    }
+    protected function generateToken($user) {
+        $jti = (new \Tuupola\Base62)->encode(random_bytes(16));
+        $payload = [
+            'iss' => "lumen-jwt",
+            'jti' => $jti,
+            'sub' => $user['id'],
+            'iat' => time(),
+            'exp' => time() + 60*60
+
+        ];
+        return JWT::encode($payload, env('JWT_SECRET'));
+    }
+
+    public function login(Request $request) {
+        try {
+            if (!$user = json_decode(file_get_contents($request->url.'/getuser?email='.urlencode($request->email)), true)) {
+                $response = response()->json(array("message" => "User not found", "success" => "false"));
+                return $response;
+            }
+        } catch (\Exception  $e) {
+            Utility::writeLogData($e);
+            $response = response()->json(array("message" => "Some error occurred", "success" => "false"));
+            return $response;
+        }
+
+        return response()->json(['token' => $this->generateToken($user)]);
+    }
+
+    public function updateToken(Request $request)
+    {
+        $client = new Client();
+        $response = $client->request('POST', $request->url.'/updatetoken', [
+            'form_params' => [
+                'id' =>  $request->id,
+                'token' => $request->get('token')
+            ]
+        ]);
+
+    }
+    public function authenticateToken(Request $request)
+    {
+        $token = $request->token;
+        if(!$token) {
+            $response = response()->json(array("message" => "Some error occurred", "success" => "false"));
+            return $response;
+        }
+        try {
+            $credentials = JWT::decode($token, env('JWT_SECRET'), ['HS256']);
+
+        } catch(ExpiredException $e) {
+            $user = json_decode(file_get_contents($request->url.'/getuserbyid?id='.urlencode($request->id)), true);
+            if ($user != null) {
+                $response = response()->json(array("message" => 'Token expired', 'token' => $this->generateToken($user), "success" => "true"));
+                return $response;
+            }
+        } catch(\Exception $e) {
+            $response = response()->json(array( 'message' => 'An error while decoding token', "success" => "false"));
+            return $response;
+        }
+        $user = json_decode(file_get_contents($request->url.'/getuserbyid?id='.urlencode($credentials->sub)), true);
+        return $user;
+
+    }
+    public function checkToken(Request $request)
+    {
+        $token = $request->get('token');
+        $userToken= json_decode(file_get_contents($request->url.'/getuser?email='.urlencode($request->email)), true);
+        if ($userToken != null) {
+            if ($userToken['token'] == $token) {
+                $response = response()->json(array('message' => 'Token matched', "success" => "true"));
+                return $response;
+            } else {
+                $response = response()->json(array('message' => 'Token not matched', "success" => "false"));
+                return $response;
+            }
+        }
+
+    }
+
+}
